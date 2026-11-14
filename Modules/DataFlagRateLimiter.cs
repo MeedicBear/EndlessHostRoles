@@ -93,6 +93,21 @@ public static class DataFlagRateLimiter
         ProcessQueue(UnreliableQueue, ref UnreliableSent, UnreliableTimer, UnreliableRateLimitPerSecond);
     }
 
+    public static void Clear()
+    {
+        while (ReliableQueue.Count > 0)
+            Drop(ReliableQueue.Dequeue());
+
+        while (UnreliableQueue.Count > 0)
+            Drop(UnreliableQueue.Dequeue());
+
+        ReliableSent = 0;
+        UnreliableSent = 0;
+        LastPingMs = 0;
+        ReliableTimer.Restart();
+        UnreliableTimer.Restart();
+    }
+
     // =========================
     // INTERNAL LOGIC
     // =========================
@@ -121,9 +136,12 @@ public static class DataFlagRateLimiter
         int limit)
     {
         // Reset window every second
-        if (timer.ElapsedMilliseconds >= 1000 + Math.Max(0, LastPingMs - AmongUsClient.Instance.Ping))
+        var client = AmongUsClient.Instance;
+        int currentPing = client ? client.Ping : 0;
+
+        if (timer.ElapsedMilliseconds >= 1000 + Math.Max(0, LastPingMs - currentPing))
         {
-            LastPingMs = AmongUsClient.Instance.Ping;
+            LastPingMs = currentPing;
             timer.Restart();
             sent = 0;
         }

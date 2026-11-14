@@ -14,6 +14,7 @@ public static class AntiBlackout
 {
     public static bool SkipTasks;
     public static bool AllowSyncSettings;
+    private static int RevertEpoch;
     private static Dictionary<(byte SeerID, byte TargetID), (RoleTypes RoleType, CustomRoles CustomRole)> CachedRoleMap = [];
 
     // Optimally, there's 1 living impostor and at least 2 living crewmates in everyone's POV.
@@ -60,6 +61,8 @@ public static class AntiBlackout
     // After the ejection screen, we revert the role types to their actual values.
     public static void RevertToActualRoleTypes()
     {
+        int epoch = ++RevertEpoch;
+
         if (CachedRoleMap.Count == 0 || GameStates.IsEnded)
         {
             SkipTasks = false;
@@ -98,12 +101,16 @@ public static class AntiBlackout
                     rolesForSeers[seerId] = role;
                 }
 
+                if (rolesForSeers.Count == 0) continue;
+
                 // First set them to the role they're most commonly seen as.
                 RoleTypes globalRole = rolesForSeers.GroupBy(x => x.Value).MaxBy(g => g.Count()).Key;
                 target.RpcSetRoleGlobal(globalRole);
 
                 LateTask.New(() =>
                 {
+                    if (epoch != RevertEpoch || GameStates.IsEnded || !AmongUsClient.Instance) return;
+
                     // Only send desync RPCs where needed. Often this will just be 1 additional RPC or none.
                     foreach ((byte seerId, RoleTypes roleTypes) in rolesForSeers)
                     {
@@ -131,6 +138,12 @@ public static class AntiBlackout
 
         LateTask.New(() =>
         {
+            if (epoch != RevertEpoch || GameStates.IsEnded || !AmongUsClient.Instance)
+            {
+                SkipTasks = false;
+                return;
+            }
+
             List<PlayerControl> rpcGuardAndKill = [];
             var elapsedSeconds = (int)ExileControllerWrapUpPatch.Stopwatch.Elapsed.TotalSeconds;
             var senderPacked = CustomRpcSender.Create("AntiBlackout Packed Sender", SendOption.Reliable).StartPackedMessage();
@@ -167,7 +180,7 @@ public static class AntiBlackout
                             if (time <= 0) continue;
                         }
 
-                        Logger.Info($"{pc.GetNameWithRole()}'s KCD set to {(time < 0f ? Main.AllPlayerKillCooldown[pc.PlayerId] : time)}s", "SetKCD");
+                        Logger.Info($"{pc.GetNameWithRole()}'s KCD set to {(time < 0f ? (Main.AllPlayerKillCooldown.TryGetValue(pc.PlayerId, out float baseKcd) ? baseKcd : 0f) : time)}s", "SetKCD");
 
                         if (pc.GetCustomRole().UsesPetInsteadOfKill())
                         {
@@ -183,10 +196,10 @@ public static class AntiBlackout
 
                         if (time >= 0f)
                             Main.AllPlayerKillCooldown[pc.PlayerId] = time * 2;
-                        else
+                        else if (Main.AllPlayerKillCooldown.ContainsKey(pc.PlayerId))
                             Main.AllPlayerKillCooldown[pc.PlayerId] *= 2;
 
-                        if (pc.Is(CustomRoles.Glitch) && Main.PlayerStates[pc.PlayerId].Role is Glitch gc)
+                        if (pc.Is(CustomRoles.Glitch) && Main.PlayerStates.TryGetValue(pc.PlayerId, out var glitchState) && glitchState.Role is Glitch gc)
                         {
                             gc.LastKill = Utils.TimeStamp + ((int)(time / 2) - Glitch.KillCooldown.GetInt());
                             gc.KCDTimer = (int)(time / 2);
@@ -215,6 +228,7 @@ public static class AntiBlackout
                         {
                             LateTask.New(() =>
                             {
+                                if (epoch != RevertEpoch || !pc || GameStates.IsEnded || !AmongUsClient.Instance) return;
                                 pc.ResetKillCooldown(sync: false);
                                 pc.MarkDirtySettings();
                             }, 0.3f, log: false);
@@ -241,7 +255,11 @@ public static class AntiBlackout
             
             rpcGuardAndKill.ForEach(pc => hasValuePacked |= senderPacked.RpcGuardAndKill(pc, fromSetKCD: true));
 
-            LateTask.New(() => senderPacked.SendMessage(dispose: !hasValuePacked), 0.1f);
+            LateTask.New(() =>
+            {
+                bool shouldDispose = !hasValuePacked || epoch != RevertEpoch || GameStates.IsEnded || !AmongUsClient.Instance;
+                senderPacked.SendMessage(dispose: shouldDispose);
+            }, 0.1f);
             
             senderToAll.SendMessage(dispose: !hasValueToAll);
 
@@ -249,6 +267,7 @@ public static class AntiBlackout
             LateTask.New(() =>
             {
                 SkipTasks = false;
+                if (epoch != RevertEpoch || GameStates.IsEnded || !AmongUsClient.Instance) return;
                 ExileControllerWrapUpPatch.AfterMeetingTasks();
             }, 1f, "Reset SkipTasks after SetRealPlayerRoles");
         }, 0.4f, "SetRealPlayerRoles - Reset Cooldowns");
@@ -257,6 +276,7 @@ public static class AntiBlackout
     public static void Reset()
     {
         Logger.Info("==Reset==", "AntiBlackout");
+        RevertEpoch++;
         CachedRoleMap = [];
         SkipTasks = false;
     }

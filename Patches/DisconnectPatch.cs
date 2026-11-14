@@ -1,3 +1,4 @@
+using EHR.Modules;
 using HarmonyLib;
 
 namespace EHR;
@@ -8,6 +9,10 @@ internal static class OnDisconnectedPatch
     public static void Postfix( /*AmongUsClient __instance*/)
     {
         Main.VisibleTasksCount = false;
+        AntiBlackout.Reset();
+        DataFlagRateLimiter.Clear();
+        PerSecondUpdateScheduler.Reset();
+        LateTask.CancelAll();
     }
 }
 /*

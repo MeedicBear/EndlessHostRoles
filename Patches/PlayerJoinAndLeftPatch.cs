@@ -588,7 +588,8 @@ internal static class OnPlayerLeftPatch
                     foreach (PlayerControl lovers in Main.LoversPlayers)
                     {
                         Main.IsLoversDead = true;
-                        Main.PlayerStates[lovers.PlayerId].RemoveSubRole(CustomRoles.Lovers);
+                        if (lovers && Main.PlayerStates.TryGetValue(lovers.PlayerId, out var loverState))
+                            loverState.RemoveSubRole(CustomRoles.Lovers);
                     }
 
                     Main.LoversPlayers.RemoveAll(x => x.PlayerId == id);
@@ -622,14 +623,16 @@ internal static class OnPlayerLeftPatch
                 Postman.CheckAndResetTargets(data.Character);
                 GhostRolesManager.AssignedGhostRoles.Remove(id);
 
-                PlayerState state = Main.PlayerStates[id];
-                if (state.deathReason == PlayerState.DeathReason.etc) state.deathReason = PlayerState.DeathReason.Disconnected;
-                if (!state.IsDead) state.SetDead();
+                if (Main.PlayerStates.TryGetValue(id, out PlayerState state))
+                {
+                    if (state.deathReason == PlayerState.DeathReason.etc) state.deathReason = PlayerState.DeathReason.Disconnected;
+                    if (!state.IsDead) state.SetDead();
 
-                Utils.AfterPlayerDeathTasks(data.Character, GameStates.IsMeeting, true);
+                    Utils.AfterPlayerDeathTasks(data.Character, GameStates.IsMeeting, true);
 
-                try { state.Role.Remove(id); }
-                catch (Exception e) { Utils.ThrowException(e); }
+                    try { state.Role.Remove(id); }
+                    catch (Exception e) { Utils.ThrowException(e); }
+                }
 
                 NameNotifyManager.Notifies.Remove(id);
                 data.Character.RpcSetName(data.Character.GetRealName(true));

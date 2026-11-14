@@ -49,6 +49,8 @@ public class CustomRpcSender
     public int messages;
     public MessageWriter stream;
 
+    public bool HasData => doneStreams.Count > 0 || stream.Length > (packed ? 11 : 3);
+
     private CustomRpcSender(string name, SendOption sendOption, bool isUnsafe, bool log)
     {
         stream = MessageWriter.Get(sendOption);
@@ -159,19 +161,22 @@ public class CustomRpcSender
 
     public void SendMessage(bool dispose = false)
     {
-        if (!dispose)
+        bool discardAll = dispose;
+        bool discardCurrentStream = dispose;
+
+        if (!discardAll)
         {
             if (currentState == State.InRootMessage) EndMessage();
         
             if (currentState == State.InRootPackedMessage)
             {
                 if (stream.Length <= 11)
-                    dispose = true;
+                    discardCurrentStream = true;
                 else
                     EndMessage();
             }
             
-            if (!dispose && currentState != State.Ready)
+            if (!discardCurrentStream && currentState != State.Ready)
             {
                 if (currentState == State.Finished)
                 {
@@ -188,12 +193,14 @@ public class CustomRpcSender
             }
         }
 
-        if (stream.Length > 1200 && !dispose) Logger.Msg($"Large packet \"{name}\" is sending ({stream.Length} bytes)", "CustomRpcSender");
-        else if (log || stream.Length > 3) Logger.Info($"\"{name}\" is finished (Length: {stream.Length}, dispose: {dispose}, sendOption: {sendOption})", "CustomRpcSender");
+        if (stream.Length > 1200 && !discardAll && !discardCurrentStream) Logger.Msg($"Large packet \"{name}\" is sending ({stream.Length} bytes)", "CustomRpcSender");
+        else if (log || stream.Length > 3) Logger.Info($"\"{name}\" is finished (Length: {stream.Length}, dispose: {discardAll}, sendOption: {sendOption})", "CustomRpcSender");
 
-        if (!dispose)
+        var client = AmongUsClient.Instance;
+
+        if (doneStreams.Count > 0)
         {
-            if (doneStreams.Count > 0)
+            if (!discardAll && client)
             {
                 var sb = new StringBuilder(" + Lengths: ");
 
@@ -202,16 +209,21 @@ public class CustomRpcSender
                     if (x.Length > 1200) Logger.Msg($"Large reliable packet \"{name}\" is sending ({x.Length} bytes)", "CustomRpcSender");
                     else if (log || x.Length > 3) sb.Append($" | {x.Length}");
 
-                    AmongUsClient.Instance.SendOrDisconnect(x);
+                    client.SendOrDisconnect(x);
                     x.Recycle();
                 });
 
                 Logger.Info(sb.ToString(), "CustomRpcSender");
-
-                doneStreams.Clear();
             }
+            else
+                doneStreams.ForEach(x => x.Recycle());
 
-            AmongUsClient.Instance.SendOrDisconnect(stream);
+            doneStreams.Clear();
+        }
+
+        if (!discardAll && !discardCurrentStream && client)
+        {
+            client.SendOrDisconnect(stream);
             onSendDelegate();
         }
 
@@ -534,8 +546,8 @@ public static class CustomRpcSenderExtensions
 
         switch (seerIsNull)
         {
-            case true when Main.LastNotifyNames.Where(x => x.Key.Item1 == player.PlayerId).All(x => x.Value == name):
-            case false when Main.LastNotifyNames[(player.PlayerId, seer.PlayerId)] == name:
+            case true when Main.LastNotifyNames.Any(x => x.Key.Item1 == player.PlayerId) && Main.LastNotifyNames.Where(x => x.Key.Item1 == player.PlayerId).All(x => x.Value == name):
+            case false when Main.LastNotifyNames.TryGetValue((player.PlayerId, seer.PlayerId), out string lastName) && lastName == name:
                 return;
             case true:
                 Main.EnumeratePlayerControls().Do(x => Main.LastNotifyNames[(player.PlayerId, x.PlayerId)] = name);
@@ -709,7 +721,7 @@ public static class CustomRpcSenderExtensions
             if (!Mathf.Approximately(time, -1f) && Committed.ReduceKCD != null && Committed.ReduceKCD.TryGetValue(player.PlayerId, out float reduction))
                 time = Math.Max(time - reduction, 0.01f);
 
-            Logger.Info($"{player.GetNameWithRole()}'s KCD set to {(Math.Abs(time - -1f) < 0.5f ? Main.AllPlayerKillCooldown[player.PlayerId] : time)}s", "SetKCD");
+            Logger.Info($"{player.GetNameWithRole()}'s KCD set to {(Math.Abs(time - -1f) < 0.5f ? Main.AllPlayerKillCooldown.GetValueOrDefault(player.PlayerId) : time)}s", "SetKCD");
 
             if (player.GetCustomRole().UsesPetInsteadOfKill())
             {
@@ -728,12 +740,12 @@ public static class CustomRpcSenderExtensions
 
             if (time >= 0f)
                 Main.AllPlayerKillCooldown[player.PlayerId] = time * 2;
-            else
+            else if (Main.AllPlayerKillCooldown.ContainsKey(player.PlayerId))
                 Main.AllPlayerKillCooldown[player.PlayerId] *= 2;
 
             var returnValue = false;
 
-            if (player.Is(CustomRoles.Glitch) && Main.PlayerStates[player.PlayerId].Role is Glitch gc)
+            if (player.Is(CustomRoles.Glitch) && Main.PlayerStates.TryGetValue(player.PlayerId, out var glitchState) && glitchState.Role is Glitch gc)
             {
                 gc.LastKill = Utils.TimeStamp + ((int)(time / 2) - Glitch.KillCooldown.GetInt());
                 gc.KCDTimer = (int)(time / 2);
@@ -745,7 +757,7 @@ public static class CustomRpcSenderExtensions
             }
             else
             {
-                time = Main.AllPlayerKillCooldown[player.PlayerId] / 2;
+                time = Main.AllPlayerKillCooldown.GetValueOrDefault(player.PlayerId) / 2;
 
                 if (player.AmOwner)
                     PlayerControl.LocalPlayer.SetKillTimer(time);
@@ -768,7 +780,11 @@ public static class CustomRpcSenderExtensions
             if (player.GetCustomRole() is not CustomRoles.Inhibitor and not CustomRoles.Saboteur)
             {
                 player.ResetKillCooldown(sync: false);
-                LateTask.New(player.SyncSettings, 1f, log: false);
+                LateTask.New(() =>
+                {
+                    if (player && !GameStates.IsEnded && AmongUsClient.Instance)
+                        player.SyncSettings();
+                }, 1f, log: false);
             }
 
             return returnValue;
@@ -780,7 +796,7 @@ public static class CustomRpcSenderExtensions
 
             Logger.Info($"Reset Ability Cooldown for {target.name} (ID: {target.PlayerId})", "RpcResetAbilityCooldown");
 
-            if (target.Is(CustomRoles.Glitch) && Main.PlayerStates[target.PlayerId].Role is Glitch gc)
+            if (target.Is(CustomRoles.Glitch) && Main.PlayerStates.TryGetValue(target.PlayerId, out var tState) && tState.Role is Glitch gc)
             {
                 gc.LastHack = Utils.TimeStamp;
                 gc.HackCDTimer = 10;
@@ -897,15 +913,16 @@ public static class CustomRpcSenderExtensions
 
         public bool SyncGeneralOptions(PlayerControl player)
         {
-            if (!AmongUsClient.Instance.AmHost || !GameStates.IsInGame || !Utils.DoRPC) return false;
+            if (!AmongUsClient.Instance.AmHost || !GameStates.IsInGame || !Utils.DoRPC || !player) return false;
+            if (!Main.PlayerStates.TryGetValue(player.PlayerId, out var state)) return false;
 
             sender.AutoStartRpc(PlayerControl.LocalPlayer.NetId, (byte)CustomRPC.SyncGeneralOptions);
             sender.Write(player.PlayerId);
             sender.WritePacked((int)player.GetCustomRole());
-            sender.Write(Main.PlayerStates[player.PlayerId].IsDead);
-            sender.WritePacked((int)Main.PlayerStates[player.PlayerId].deathReason);
-            sender.Write(Main.AllPlayerKillCooldown[player.PlayerId]);
-            sender.Write(Main.AllPlayerSpeed[player.PlayerId]);
+            sender.Write(state.IsDead);
+            sender.WritePacked((int)state.deathReason);
+            sender.Write(Main.AllPlayerKillCooldown.GetValueOrDefault(player.PlayerId));
+            sender.Write(Main.AllPlayerSpeed.GetValueOrDefault(player.PlayerId, Main.MinSpeed));
             sender.EndRpc();
 
             return true;

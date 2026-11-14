@@ -502,7 +502,7 @@ public static class CollectionExtensions
             // RpcSetName will handle oversized packets
         }
 
-        sender.SendMessage(dispose: !hasValue || sender.stream.Length <= 11);
+        sender.SendMessage(dispose: !hasValue && !sender.HasData);
     }
     public static void NotifyPlayers(this List<PlayerControl> players, string text, float time = 6f, bool overrideAll = false, bool log = true, bool setName = true, SendOption sendOption = SendOption.Reliable)
     {
@@ -515,7 +515,7 @@ public static class CollectionExtensions
             // RpcSetName will handle oversized packets
         }
 
-        sender.SendMessage(dispose: !hasValue || sender.stream.Length <= 11);
+        sender.SendMessage(dispose: !hasValue && !sender.HasData);
     }
 
     #region ToValidPlayers
