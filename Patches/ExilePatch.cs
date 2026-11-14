@@ -21,14 +21,15 @@ internal static class ExileControllerWrapUpPatch
     {
         if (!AmongUsClient.Instance.AmHost) return;
         
-        CustomRoles role = exiled.GetCustomRole();
+        CustomRoles role = exiled != null ? exiled.GetCustomRole() : CustomRoles.NotAssigned;
         bool collectorWin = Collector.CollectorWin(false);
         bool decidedWinner = collectorWin;
 
         if (!collectorWin && exiled != null)
         {
             //exiled.IsDead = true;
-            Main.PlayerStates[exiled.PlayerId].deathReason = PlayerState.DeathReason.Vote;
+            if (Main.PlayerStates.TryGetValue(exiled.PlayerId, out var exiledState))
+                exiledState.deathReason = PlayerState.DeathReason.Vote;
 
             if (Main.EnumeratePlayerControls().Any(x => x.Is(CustomRoles.Innocent) && !x.IsAlive() && x.GetRealKiller()?.PlayerId == exiled.PlayerId))
             {
@@ -60,11 +61,11 @@ internal static class ExileControllerWrapUpPatch
                 Damocles.OnCrewmateEjected();
             }
 
-            if (CustomWinnerHolder.WinnerTeam != CustomWinner.Terrorist)
-                Main.PlayerStates[exiled.PlayerId].SetDead();
+            if (CustomWinnerHolder.WinnerTeam != CustomWinner.Terrorist && exiledState != null)
+                exiledState.SetDead();
         }
 
-        if (role == CustomRoles.Jester)
+        if (exiled != null && role == CustomRoles.Jester)
         {
             if (decidedWinner) CustomWinnerHolder.ShiftWinnerAndSetWinner(CustomWinner.Jester);
             else CustomWinnerHolder.ResetAndSetWinner(CustomWinner.Jester);
@@ -133,7 +134,7 @@ internal static class ExileControllerWrapUpPatch
             {
                 exiledPlayer.RpcExileV2();
                 Utils.AfterPlayerDeathTasks(exiledPlayer, true);
-                if (exiledPlayer.IsAlive()) Main.PlayerStates[exiledPlayer.PlayerId].SetDead();
+                if (exiledPlayer.IsAlive() && Main.PlayerStates.TryGetValue(exiledPlayer.PlayerId, out var exState)) exState.SetDead();
             }
         }, 3.5f, "AfterPlayerDeathTasks For Exiled Player");
     }
@@ -199,20 +200,25 @@ internal static class ExileControllerWrapUpPatch
 
         foreach ((byte id, PlayerState.DeathReason deathReason) in Main.AfterMeetingDeathPlayers)
         {
-            var player = id.GetPlayer();
-            var state = Main.PlayerStates[id];
+            try
+            {
+                var player = id.GetPlayer();
+                if (!Main.PlayerStates.TryGetValue(id, out var state)) continue;
 
-            Logger.Info($"{Main.AllPlayerNames[id]} ({state.MainRole}) died with {deathReason}", "AfterMeetingDeath");
+                string playerName = Main.AllPlayerNames.TryGetValue(id, out string n) ? n : $"ID {id}";
+                Logger.Info($"{playerName} ({state.MainRole}) died with {deathReason}", "AfterMeetingDeath");
 
-            state.deathReason = deathReason;
-            state.SetDead();
+                state.deathReason = deathReason;
+                state.SetDead();
 
-            if (!player) continue;
+                if (!player) continue;
 
-            if (deathReason == PlayerState.DeathReason.Suicide)
-                player.SetRealKiller(player, true);
+                if (deathReason == PlayerState.DeathReason.Suicide)
+                    player.SetRealKiller(player, true);
 
-            Utils.AfterPlayerDeathTasks(player);
+                Utils.AfterPlayerDeathTasks(player);
+            }
+            catch (Exception e) { Utils.ThrowException(e); }
         }
 
         Main.AfterMeetingDeathPlayers.Clear();

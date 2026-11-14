@@ -2784,16 +2784,37 @@ public static class Utils
         };
     }
 
+    private static readonly Dictionary<Type, bool> RoleGetSuffixCache = [];
+
+    private static bool HasCustomGetSuffix(RoleBase role)
+    {
+        if (role == null) return false;
+
+        Type type = role.GetType();
+        if (RoleGetSuffixCache.TryGetValue(type, out bool hasCustom)) return hasCustom;
+
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public;
+        hasCustom = type.GetMethod(nameof(RoleBase.GetSuffix), flags)?.DeclaringType != typeof(RoleBase);
+        RoleGetSuffixCache[type] = hasCustom;
+        return hasCustom;
+    }
+
     public static string BuildSuffix(PlayerControl seer, PlayerControl target, bool hud = false, bool meeting = false)
     {
         BuildSBSuffix.Clear().Append("<#ffffff>");
 
         foreach (PlayerState state in Main.PlayerStates.Values)
         {
-            string tempSuffix = state.Role.GetSuffix(seer, target, hud, meeting);
+            if (state?.Role == null || !HasCustomGetSuffix(state.Role)) continue;
 
-            if (!string.IsNullOrWhiteSpace(tempSuffix))
-                BuildSBSuffix.Append($"{tempSuffix}\n");
+            try
+            {
+                string tempSuffix = state.Role.GetSuffix(seer, target, hud, meeting);
+
+                if (!string.IsNullOrWhiteSpace(tempSuffix))
+                    BuildSBSuffix.Append($"{tempSuffix}\n");
+            }
+            catch (Exception e) { ThrowException(e); }
         }
 
         BuildSBSuffix.Append(CustomSabotage.GetAllSuffix(seer, target, hud, meeting));
@@ -2803,11 +2824,12 @@ public static class Utils
 
     public static IEnumerator NotifyEveryoneAsync(bool noCache = true, SendOption sendOption = SendOption.Reliable)
     {
-        if (!AmongUsClient.Instance.AmHost || GameStates.IsMeeting) yield break;
+        if (!AmongUsClient.Instance || !AmongUsClient.Instance.AmHost || GameStates.IsMeeting) yield break;
 
         const int frameBudget = 3; // milliseconds per frame
         var stopwatch = Stopwatch.StartNew();
-        var aapc = Main.CachedAlivePlayerControls();
+        var aapc = Main.AllAlivePlayerControlsToList;
+        List<PlayerControl> singleSeer = [null];
         var hasValue = false;
         var sender = CustomRpcSender.Create("NotifyRoles", sendOption, log: false);
         sender.StartPackedMessage();
@@ -2815,19 +2837,25 @@ public static class Utils
         for (int seerIndex = 0; seerIndex < aapc.Count; seerIndex++)
         {
             PlayerControl seer = aapc[seerIndex];
-            hasValue |= WriteSetNameRpcsToSender(ref sender, false, noCache, false, false, false, false, seer, [seer], aapc, out bool senderWasCleared, sendOption);
+            if (!seer) continue;
+            singleSeer[0] = seer;
+            hasValue |= WriteSetNameRpcsToSender(ref sender, false, noCache, false, false, false, false, seer, singleSeer, aapc, out bool senderWasCleared, sendOption);
             if (senderWasCleared) hasValue = false;
             
             if (stopwatch.ElapsedMilliseconds >= frameBudget)
             {
                 stopwatch.Reset();
                 yield return null;
-                if (GameStates.IsMeeting || ReportDeadBodyPatch.MeetingStarted) yield break;
+                if (GameStates.IsMeeting || ReportDeadBodyPatch.MeetingStarted || GameStates.IsEnded || !AmongUsClient.Instance)
+                {
+                    sender.SendMessage(dispose: true);
+                    yield break;
+                }
                 stopwatch.Start();
             }
         }
 
-        sender.SendMessage(!hasValue || sender.stream.Length <= 11);
+        sender.SendMessage(dispose: !hasValue && !sender.HasData);
     }
 
     [SuppressMessage("ReSharper", "InconsistentNaming")]
@@ -2854,7 +2882,7 @@ public static class Utils
                 if (senderWasCleared) hasValue = false;
             }
 
-            sender.SendMessage(!hasValue || sender.stream.Length <= 11);
+            sender.SendMessage(!hasValue && !sender.HasData);
 
             if (Options.CurrentGameMode != CustomGameMode.Standard) return;
 
@@ -2893,10 +2921,12 @@ public static class Utils
             var lovers = Main.LoversPlayers;
             var seerIsLover = false;
 
+            Main.PlayerStates.TryGetValue(seer.PlayerId, out var seerState);
+
             if (seer.Is(CustomRoles.Car) && !forMeeting && !GameStates.IsEnded)
                 goto SkipSelf;
             
-            if (Main.PlayerStates.TryGetValue(seer.PlayerId, out var seerState) && seerState.Role is Tree { TreeSpriteActive: true } && !forMeeting && !GameStates.IsEnded)
+            if (seerState?.Role is Tree { TreeSpriteActive: true } && !forMeeting && !GameStates.IsEnded)
                 goto SkipSelf;
 
             if (forMeeting && Magistrate.CallCourtNextMeeting)
@@ -2906,7 +2936,7 @@ public static class Utils
                 return true;
             }
 
-            if (forMeeting && seer.GetClient().PlatformData.Platform is Platforms.Playstation or Platforms.Switch)
+            if (forMeeting && seer.GetClient()?.PlatformData?.Platform is Platforms.Playstation or Platforms.Switch)
                 fontSize = "70%";
 
             // Text containing progress, such as tasks
@@ -2947,7 +2977,7 @@ public static class Utils
                 if (Silencer.ForSilencer.Contains(seer.PlayerId) && forMeeting) 
                     SelfMark.Append(CustomRoles.Silencer.ColoredTextByRole("╳"));
 
-                if (Main.PlayerStates[seer.PlayerId].Role is CovenBase { HasNecronomicon: true })
+                if (seerState?.Role is CovenBase { HasNecronomicon: true })
                     SelfMark.Append(" <").Append(Main.CovenColor).Append(">♤</color>");
 
                 GameMode0:
@@ -3160,7 +3190,7 @@ public static class Utils
 
                 for (int index = 0; index < devourerList.Count; index++)
                 {
-                    var state = states[devourerList[index]];
+                    if (!states.TryGetValue(devourerList[index], out var state) || state?.Role == null) continue;
                     var role = state.Role;
 
                     if (role is Devourer { IsEnable: true } dv && dv.PlayerSkinsCosumed.Contains(seerId))
@@ -3306,10 +3336,10 @@ public static class Utils
                                 case CustomRoles.Investigator when Investigator.InvestigatorTimer != null && Investigator.InvestigatorTimer.TryGetValue(seer.PlayerId, out (PlayerControl PLAYER, float TIMER) arKvp2) && arKvp2.PLAYER == target:
                                     TargetMark.Append(CustomRoles.Investigator.ColoredTextByRole("○"));
                                     break;
-                                case CustomRoles.Analyst when (Main.PlayerStates[seer.PlayerId].Role as Analyst).CurrentTarget.ID == target.PlayerId:
+                                case CustomRoles.Analyst when seerState?.Role is Analyst an && an.CurrentTarget.ID == target.PlayerId:
                                     TargetMark.Append(CustomRoles.Analyst.ColoredTextByRole("○")); 
                                     break;
-                                case CustomRoles.Samurai when (Main.PlayerStates[seer.PlayerId].Role as Samurai).Target.Id == target.PlayerId:
+                                case CustomRoles.Samurai when seerState?.Role is Samurai sam && sam.Target.Id == target.PlayerId:
                                     TargetMark.Append(CustomRoles.Samurai.ColoredTextByRole("○"));
                                     break;
                                 case CustomRoles.Puppeteer when Puppeteer.PuppeteerList.ContainsValue(seer.PlayerId) && Puppeteer.PuppeteerList.ContainsKey(target.PlayerId):
@@ -3392,8 +3422,8 @@ public static class Utils
                                 case CustomRoles.Psychic when seer.IsAlive() && Psychic.IsRedForPsy(target, seer) && forMeeting:
                                     targetPlayerName = CustomRoles.Impostor.ColoredTextByRole(targetPlayerName);
                                     break;
-                                case CustomRoles.HeadHunter when (Main.PlayerStates[seer.PlayerId].Role as HeadHunter).Targets.Contains(target.PlayerId) && seer.IsAlive():
-                                case CustomRoles.BountyHunter when (Main.PlayerStates[seer.PlayerId].Role as BountyHunter).GetTarget(seer) == target.PlayerId && seer.IsAlive():
+                                case CustomRoles.HeadHunter when seerState?.Role is HeadHunter hh && hh.Targets.Contains(target.PlayerId) && seer.IsAlive():
+                                case CustomRoles.BountyHunter when seerState?.Role is BountyHunter bh && bh.GetTarget(seer) == target.PlayerId && seer.IsAlive():
                                     targetPlayerName = $"<color=black>{targetPlayerName}</size>";
                                     break;
                                 case CustomRoles.Lookout when seer.IsAlive() && target.IsAlive() && !forMeeting:
@@ -3498,7 +3528,7 @@ public static class Utils
 
                                 for (int index = 0; index < devourerList.Count; index++)
                                 {
-                                    var state = states[devourerList[index]];
+                                    if (!states.TryGetValue(devourerList[index], out var state) || state?.Role == null) continue;
                                     var role = state.Role;
 
                                     if (role is Devourer { IsEnable: true } dv && dv.PlayerSkinsCosumed.Contains(seerId))

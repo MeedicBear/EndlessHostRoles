@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using AmongUs.GameOptions;
 using EHR.Gamemodes;
 using EHR.Modules;
@@ -1565,6 +1566,21 @@ internal static class FixedUpdatePatch
     private static readonly Dictionary<byte, long> LastAddAbilityTime = [];
     private static readonly List<string> AdditionalSuffixes = [];
     private static long LastErrorTS;
+    private static readonly Dictionary<Type, (bool HasCheckPos, bool HasGlobalFixed)> RoleUpdateCache = [];
+
+    private static (bool HasCheckPos, bool HasGlobalFixed) GetRoleUpdateCaps(RoleBase role)
+    {
+        Type type = role.GetType();
+        if (RoleUpdateCache.TryGetValue(type, out var caps)) return caps;
+
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public;
+        bool hasCheckPos = type.GetMethod(nameof(RoleBase.OnCheckPlayerPosition), flags)?.DeclaringType != typeof(RoleBase);
+        bool hasGlobalFixed = type.GetMethod(nameof(RoleBase.OnGlobalFixedUpdate), flags)?.DeclaringType != typeof(RoleBase);
+
+        caps = (hasCheckPos, hasGlobalFixed);
+        RoleUpdateCache[type] = caps;
+        return caps;
+    }
 
     public static void Postfix(PlayerControl __instance, bool lowLoad)
     {
@@ -1746,7 +1762,7 @@ internal static class FixedUpdatePatch
 
                 SabotageSystemTypeUpdateSystemPatch.SabotageDoubleTrigger.Update(Time.deltaTime);
 
-                if (playerState.Role.IsEnable)
+                if (playerState?.Role is { IsEnable: true })
                     playerState.Role.OnFixedUpdate(player);
 
                 if (inTask && player.Is(CustomRoles.PlagueBearer) && PlagueBearer.IsPlaguedAll(player))
@@ -1776,10 +1792,17 @@ internal static class FixedUpdatePatch
 
                 foreach (PlayerState state in Main.PlayerStates.Values)
                 {
-                    if (!state.Role.IsEnable) continue;
+                    if (state?.Role is not { IsEnable: true } role) continue;
 
-                    if (checkPos) state.Role.OnCheckPlayerPosition(player);
-                    state.Role.OnGlobalFixedUpdate(player, lowLoad);
+                    var (hasCheckPos, hasGlobalFixed) = GetRoleUpdateCaps(role);
+                    if (!hasCheckPos && !hasGlobalFixed) continue;
+
+                    try
+                    {
+                        if (checkPos && hasCheckPos) role.OnCheckPlayerPosition(player);
+                        if (hasGlobalFixed) role.OnGlobalFixedUpdate(player, lowLoad);
+                    }
+                    catch (Exception e) { ThrowException(e); }
                 }
 
                 if (!lowLoad && inTask && alive && playerState != null)
@@ -1835,7 +1858,7 @@ internal static class FixedUpdatePatch
         if (!lowLoad)
         {
             // Ability Use Gain every 5 seconds
-            if (inTask && alive && playerState.TaskState.IsTaskFinished && (!LastAddAbilityTime.TryGetValue(playerId, out long ts) || ts + 5 < now))
+            if (inTask && alive && playerState?.TaskState is { IsTaskFinished: true } && (!LastAddAbilityTime.TryGetValue(playerId, out long ts) || ts + 5 < now))
             {
                 LastAddAbilityTime[playerId] = now;
                 AddExtraAbilityUsesOnFinishedTasks(player);
@@ -1869,7 +1892,12 @@ internal static class FixedUpdatePatch
                     player.cosmetics.nameText.text = $"<color=#ff0000><size=1.4>v{ver.version}</size>\n{player.name}</color>";
             }
             else
-                player.cosmetics.nameText.text = Main.ShowPlayerInfoInLobby.Value && !player.AmOwner ? $"<#888888><size=1.2>{player.GetClient().PlatformData.Platform} | {player.FriendCode} | {player.GetClient().GetHashedPuid()}</size></color>\n{player.Data?.PlayerName}" : player.Data?.PlayerName;
+            {
+                var client = player.GetClient();
+                player.cosmetics.nameText.text = Main.ShowPlayerInfoInLobby.Value && !player.AmOwner && client?.PlatformData != null
+                    ? $"<#888888><size=1.2>{client.PlatformData.Platform} | {player.FriendCode} | {client.GetHashedPuid()}</size></color>\n{player.Data?.PlayerName}"
+                    : player.Data?.PlayerName;
+            }
         }
 
         if (isInGame)

@@ -26,6 +26,12 @@ internal static class CheckForEndVotingPatch
 
     private static readonly List<MeetingHud.VoterState> StatesList = [];
     private static MeetingHud.VoterState[] States = [];
+
+    private static void SafeRun(Action action)
+    {
+        try { action(); }
+        catch (Exception e) { Utils.ThrowException(e); }
+    }
     public static bool Prefix(MeetingHud __instance)
     {
         if (!AmongUsClient.Instance.AmHost) return true;
@@ -65,34 +71,37 @@ internal static class CheckForEndVotingPatch
                 if (pc.Is(CustomRoles.Dictator) && pva.DidVote && pc.PlayerId != pva.VotedForId && pva.VotedForId < 253 && pc.Data?.IsDead == false && pc.GetTaskState().CompletedTasksCount >= Dictator.MinTasksToDictate.GetInt())
                 {
                     PlayerControl voteTarget = Utils.GetPlayerById(pva.VotedForId);
-                    TryAddAfterMeetingDeathPlayers(PlayerState.DeathReason.Suicide, pc.PlayerId);
-
-                    StatesList.Add(new()
+                    if (voteTarget && voteTarget.Data && !voteTarget.Data.Disconnected)
                     {
-                        VoterId = pva.PlayerId,
-                        VotedForId = pva.VotedForId
-                    });
+                        TryAddAfterMeetingDeathPlayers(PlayerState.DeathReason.Suicide, pc.PlayerId);
 
-                    States = [.. StatesList];
+                        StatesList.Add(new()
+                        {
+                            VoterId = pva.PlayerId,
+                            VotedForId = pva.VotedForId
+                        });
 
-                    voteTarget.SetRealKiller(pc);
-                    Main.LastVotedPlayerInfo = voteTarget.Data;
-                    ExileControllerWrapUpPatch.LastExiled = voteTarget.Data;
+                        States = [.. StatesList];
 
-                    if (Main.LastVotedPlayerInfo != null)
-                        ConfirmEjections(Main.LastVotedPlayerInfo, false);
+                        voteTarget.SetRealKiller(pc);
+                        Main.LastVotedPlayerInfo = voteTarget.Data;
+                        ExileControllerWrapUpPatch.LastExiled = voteTarget.Data;
 
-                    __instance.RpcVotingComplete(States.ToArray(), voteTarget.Data, false, false, 0);
+                        if (Main.LastVotedPlayerInfo != null)
+                            ConfirmEjections(Main.LastVotedPlayerInfo, false);
 
-                    Statistics.OnVotingComplete(States.ToArray(), voteTarget.Data, false, true);
+                        __instance.RpcVotingComplete(States.ToArray(), voteTarget.Data, false, false, 0);
 
-                    Logger.Info($"{voteTarget.GetNameWithRole()} expelled by dictator", "Dictator");
-                    CheckForDeathOnExile(PlayerState.DeathReason.Vote, pva.VotedForId);
-                    Logger.Info("Dictatorship vote, forced end of meeting", "Special Phase");
+                        Statistics.OnVotingComplete(States.ToArray(), voteTarget.Data, false, true);
 
-                    MeetingHudRpcClosePatch.AllowClose = true;
+                        Logger.Info($"{voteTarget.GetNameWithRole()} expelled by dictator", "Dictator");
+                        CheckForDeathOnExile(PlayerState.DeathReason.Vote, pva.VotedForId);
+                        Logger.Info("Dictatorship vote, forced end of meeting", "Special Phase");
 
-                    return true;
+                        MeetingHudRpcClosePatch.AllowClose = true;
+
+                        return true;
+                    }
                 }
 
                 if (pva.DidVote && pva.VotedForId < 253 && pc.IsAlive())
@@ -107,7 +116,13 @@ internal static class CheckForEndVotingPatch
                         pva.VotedForId = byte.MaxValue;
                     }
                     else if (voteTarget && !pc.GetCustomRole().CancelsVote() && !pc.UsesMeetingShapeshift() && !pc.UsesJudgeAbilityAsTrigger())
-                        Main.PlayerStates[pc.PlayerId].Role.OnVote(pc, voteTarget);
+                    {
+                        if (Main.PlayerStates.TryGetValue(pc.PlayerId, out var vState) && vState.Role != null)
+                        {
+                            try { vState.Role.OnVote(pc, voteTarget); }
+                            catch (Exception e) { Utils.ThrowException(e); }
+                        }
+                    }
                     else if (pc.Is(CustomRoles.Godfather)) Godfather.GodfatherTarget = byte.MaxValue;
                 }
             }
@@ -192,7 +207,8 @@ internal static class CheckForEndVotingPatch
                 if (Poache.PoachedPlayers != null && Poache.PoachedPlayers.Contains(playerId)) canVote = false;
                 if (Silencer.ForSilencer.Contains(playerId) && Main.AllAlivePlayerControlsCount > Silencer.MaxPlayersAliveForSilencedToVote.GetInt()) canVote = false;
 
-                switch (Main.PlayerStates[playerId].Role)
+                Main.PlayerStates.TryGetValue(playerId, out var pState);
+                switch (pState?.Role)
                 {
                     case Adventurer { IsEnable: true } av when av.ActiveWeapons.Contains(Adventurer.Weapon.Proxy):
                         AddVote();
@@ -245,18 +261,18 @@ internal static class CheckForEndVotingPatch
                     });
             }
 
-            Committed.OnVotingResultsShown(StatesList);
-            Summoner.OnMeetingEnd();
-            QuizMaster.OnMeetingEnd();
+            SafeRun(() => Committed.OnVotingResultsShown(StatesList));
+            SafeRun(Summoner.OnMeetingEnd);
+            SafeRun(QuizMaster.OnMeetingEnd);
 
             States = [.. StatesList];
 
             Dictionary<byte, int> votingData = __instance.CustomCalculateVotes();
 
-            Blackmailer.ManipulateVotingResult(votingData, States);
-            Swapper.ManipulateVotingResult(votingData, States);
-            MeetingAngel.NegateVotes(votingData, States);
-            Assumer.OnVotingEnd(votingData);
+            SafeRun(() => Blackmailer.ManipulateVotingResult(votingData, States));
+            SafeRun(() => Swapper.ManipulateVotingResult(votingData, States));
+            SafeRun(() => MeetingAngel.NegateVotes(votingData, States));
+            SafeRun(() => Assumer.OnVotingEnd(votingData));
 
             var exileId = byte.MaxValue;
             var max = 0;
@@ -355,7 +371,8 @@ internal static class CheckForEndVotingPatch
             {
                 wasOverruled = true;
                 overruleNonce = winningOverrule.OverruleNonce;
-                exiledPlayer = overruledPlayerInfo.Object.GetTeam() is Team.Impostor or Team.Coven || overruledPlayerInfo.Object.GetCustomRole().GetNeutralRoleCategory() is RoleOptionType.Neutral_Evil or RoleOptionType.Neutral_Pariah or RoleOptionType.Neutral_Killing
+                PlayerControl overruledPc = overruledPlayerInfo ? overruledPlayerInfo.Object : null;
+                exiledPlayer = overruledPc && (overruledPc.GetTeam() is Team.Impostor or Team.Coven || overruledPc.GetCustomRole().GetNeutralRoleCategory() is RoleOptionType.Neutral_Evil or RoleOptionType.Neutral_Pariah or RoleOptionType.Neutral_Killing)
                     ? GameData.Instance.GetPlayerById(winningOverrule.OverruledPlayerId)
                     : judgePlayerInfo;
             }
@@ -385,7 +402,7 @@ internal static class CheckForEndVotingPatch
     {
         if (!AmongUsClient.Instance.AmHost) return;
 
-        if (!exiledPlayer) return;
+        if (!exiledPlayer || !exiledPlayer.Object) return;
 
         byte exileId = exiledPlayer.PlayerId;
         if (exileId > 254) return;
@@ -435,7 +452,7 @@ internal static class CheckForEndVotingPatch
                 covennum++;
         }
 
-        string coloredRealName = Utils.ColorString(Main.PlayerColors[player.PlayerId], realName);
+        string coloredRealName = Utils.ColorString(Main.PlayerColors.GetValueOrDefault(player.PlayerId, Color.white), realName);
 
         switch (Options.CEMode.GetInt())
         {
@@ -562,14 +579,14 @@ internal static class CheckForEndVotingPatch
 
     public static bool CheckRole(byte id, CustomRoles role)
     {
-        PlayerState s = Main.PlayerStates[id];
+        if (!Main.PlayerStates.TryGetValue(id, out PlayerState s)) return false;
         return role.IsAdditionRole() ? s.SubRoles.Contains(role) : s.MainRole == role;
     }
 
     public static void TryAddAfterMeetingDeathPlayers(PlayerState.DeathReason deathReason, params byte[] playerIds)
     {
         if (playerIds.Length == 0) return;
-        Logger.Info($"{playerIds.Join(x => Main.AllPlayerNames[x])} - died with the reason: {deathReason}", "TryAddAfterMeetingDeathPlayers");
+        Logger.Info($"{playerIds.Join(x => Main.AllPlayerNames.GetValueOrDefault(x, $"ID {x}"))} - died with the reason: {deathReason}", "TryAddAfterMeetingDeathPlayers");
         byte[] addedIdList = playerIds.Where(id => (!Main.PlayerStates.TryGetValue(id, out PlayerState state) || state.MainRole != CustomRoles.Pestilence) && Main.AfterMeetingDeathPlayers.TryAdd(id, deathReason)).ToArray();
         CheckForDeathOnExile(deathReason, addedIdList);
     }
@@ -671,7 +688,8 @@ internal static class ExtendedMeetingHud
                 if (CheckForEndVotingPatch.CheckRole(psPlayerId, CustomRoles.Schizophrenic) && Options.DualVotes.GetBool()) voteNum += voteNum;
                 if (CheckForEndVotingPatch.CheckRole(psPlayerId, CustomRoles.Stealer)) voteNum += (int)(Main.EnumeratePlayerControls().Count(x => x.GetRealKiller()?.PlayerId == psPlayerId) * Options.VotesPerKill.GetFloat());
                 
-                switch (Main.PlayerStates[psPlayerId].Role)
+                Main.PlayerStates.TryGetValue(psPlayerId, out var psState);
+                switch (psState?.Role)
                 {
                     case Dad { IsEnable: true } dad when dad.UsingAbilities.Contains(Dad.Ability.GoForMilk):
                     case Shifter when !Shifter.CanVote.GetBool():
@@ -775,7 +793,9 @@ internal static class MeetingHudStartPatch
 
                 LateTask.New(() =>
                 {
+                    if (!AmongUsClient.Instance || !AmongUsClient.Instance.AmHost || GameStates.IsEnded || !GameStates.IsMeeting) return;
                     PlayerControl player = Main.EnumerateAlivePlayerControls().MinBy(x => x.PlayerId);
+                    if (!player || !player.Data) return;
                     var sender = CustomRpcSender.Create("Fix Sender Name", SendOption.Reliable);
                     {
                         sender.AutoStartRpc(player.NetId, 6);
@@ -879,7 +899,11 @@ internal static class MeetingHudStartPatch
             }
         }
 
-        if (MsgToSend.Count > 0) LateTask.New(() => MsgToSend.Do(x => Utils.SendMessage(x.Text, x.SendTo, x.Title, importance: MessageImportance.High)), 9f, "Meeting Start Notify");
+        if (MsgToSend.Count > 0) LateTask.New(() =>
+        {
+            if (!AmongUsClient.Instance || !AmongUsClient.Instance.AmHost || GameStates.IsEnded || !GameStates.IsMeeting) return;
+            MsgToSend.Do(x => Utils.SendMessage(x.Text, x.SendTo, x.Title, importance: MessageImportance.High));
+        }, 9f, "Meeting Start Notify");
 
         Main.SuperStarDead.Clear();
         Forensic.ForensicNotify = null;
@@ -1045,10 +1069,13 @@ internal static class MeetingHudStartPatch
             
             LateTask.New(() =>
             {
+                if (!AmongUsClient.Instance || !AmongUsClient.Instance.AmHost || GameStates.IsEnded || !GameStates.IsMeeting) return;
+
                 var sender = CustomRpcSender.Create("RpcSetNameEx on meeting start", SendOption.Reliable);
 
                 foreach (PlayerControl pc in Main.EnumeratePlayerControls())
                 {
+                    if (!pc || !pc.Data) continue;
                     string name = pc.GetRealName(true);
 
                     if (Magistrate.CallCourtNextMeeting)
@@ -1222,31 +1249,37 @@ internal static class MeetingHudStartPatch
 
         // -------------------------------------------------------------------------------------------
 
-        CovenBase.CovenMeetingStartPatch.Postfix();
+        static void SafeRun(Action action)
+        {
+            try { action(); }
+            catch (Exception e) { Utils.ThrowException(e); }
+        }
 
-        GuessManager.StartMeetingPatch.Postfix(__instance);
-        Inspector.StartMeetingPatch.Postfix(__instance);
-        Prosecutor.StartMeetingPatch.Postfix(__instance);
-        Swapper.StartMeetingPatch.Postfix(__instance);
-        Councillor.StartMeetingPatch.Postfix(__instance);
-        Nemesis.StartMeetingPatch.Postfix(__instance);
-        Imitator.StartMeetingPatch.Postfix(__instance);
-        Retributionist.StartMeetingPatch.Postfix(__instance);
-        Starspawn.StartMeetingPatch.Postfix(__instance);
-        Ventriloquist.StartMeetingPatch.Postfix(__instance);
-        Exorcist.StartMeetingPatch.Postfix(__instance);
-        Summoner.StartMeetingPatch.Postfix(__instance);
-        Loner.StartMeetingPatch.Postfix(__instance);
-        Changeling.StartMeetingPatch.Postfix(__instance);
-        Markseeker.StartMeetingPatch.Postfix(__instance);
-        Forger.StartMeetingPatch.Postfix(__instance);
-        Inquirer.StartMeetingPatch.Postfix(__instance);
-        Pawn.StartMeetingPatch.Postfix(__instance);
+        SafeRun(CovenBase.CovenMeetingStartPatch.Postfix);
 
-        ShowHostMeetingPatch.Setup_Postfix(__instance);
-        Crowded.MeetingHudStartPatch.Postfix(__instance);
+        SafeRun(() => GuessManager.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Inspector.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Prosecutor.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Swapper.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Councillor.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Nemesis.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Imitator.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Retributionist.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Starspawn.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Ventriloquist.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Exorcist.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Summoner.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Loner.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Changeling.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Markseeker.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Forger.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Inquirer.StartMeetingPatch.Postfix(__instance));
+        SafeRun(() => Pawn.StartMeetingPatch.Postfix(__instance));
+
+        SafeRun(() => ShowHostMeetingPatch.Setup_Postfix(__instance));
+        SafeRun(() => Crowded.MeetingHudStartPatch.Postfix(__instance));
         
-        TextBoxPatch.OnMeetingStart();
+        SafeRun(TextBoxPatch.OnMeetingStart);
     }
 }
 
